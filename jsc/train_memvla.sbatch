@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=m3
 #SBATCH --partition=booster
-#SBATCH --nodes=1
+#SBATCH --nodes=1          # override at submit: sbatch --nodes=N
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=48
@@ -56,7 +56,12 @@ DATA_ROOT="$SSM/artifacts/rlds/${TASK}"
 RUN_ROOT="$SSM/artifacts/memvla_runs"
 RUN_ID="memvla_${TASK}"
 
-N_GPU=4
+N_GPU=4                                  # GPUs per node (gres above)
+# [JSC] multi-node: torchrun needs --nnodes and each rank needs the SAME rendezvous. Derive
+# both from SLURM so `sbatch --nodes=4` is the only thing that has to change. world size =
+# N_NODES * N_GPU, and expected_world_size must match or FSDP hangs at init.
+N_NODES="${SLURM_JOB_NUM_NODES:-1}"
+WORLD=$((N_NODES * N_GPU))
 # Capture what the caller actually exported BEFORE applying any default, so an explicit
 # `--export=...,BS=1` survives the SMOKE branch. (Defaulting first and then reassigning inside
 # the branch silently ignored the caller's value and made a batch-size sweep impossible.)
@@ -86,7 +91,7 @@ else
 fi
 # Effective batch, held at upstream-comparable 128 by gradient accumulation rather than by a
 # per-device batch this machine cannot fit.
-GLOBAL_BS="${GLOBAL_BS:-$((N_GPU * BS))}"
+GLOBAL_BS="${GLOBAL_BS:-$((WORLD * BS))}"
 if [ "$SMOKE" != "1" ]; then GLOBAL_BS="${GLOBAL_BS_REQ:-128}"; fi
 
 # load_vla() wants `<run_dir>/checkpoints/<name>.pt` with config.json + dataset_statistics.json
@@ -123,7 +128,7 @@ if [ "${RESUME:-0}" = "1" ]; then
 fi
 [ -d "$DATA_ROOT/franka_lerobot" ] || { echo "FATAL: no RLDS at $DATA_ROOT. Run jsc/convert_rlds.sbatch first."; exit 1; }
 
-echo "task=$TASK  gpus=$N_GPU  bs=$BS  max_steps=$MAX_STEPS  smoke=$SMOKE"
+echo "task=$TASK  nodes=$N_NODES gpus/node=$N_GPU world=$WORLD  bs=$BS  global_bs=$GLOBAL_BS  max_steps=$MAX_STEPS  smoke=$SMOKE"
 echo "ckpt=$CKPT"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -147,13 +152,14 @@ export MASTER_PORT=${MASTER_PORT:-29511}
 # nothing: '("jsonl",)' parses to ('(', '"', 'j', 's', ...) and a bare 'jsonl' to ('j','s',...).
 # jsonl only -- W&B would need network from a compute node that has none.
 
-srun torchrun --nnodes=1 --nproc_per_node=$N_GPU \
+srun torchrun --nnodes=$N_NODES --nproc_per_node=$N_GPU \
+    --node_rank="$SLURM_NODEID" \
     --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
   train.py \
     --pretrained_checkpoint "$CKPT" \
     --vla.type 'prism-dinosiglip-224px+oxe+diffusion' \
     --vla.data_mix 'franka_lerobot' \
-    --vla.expected_world_size $N_GPU \
+    --vla.expected_world_size $WORLD \
     --vla.per_device_batch_size $BS \
     --vla.global_batch_size $GLOBAL_BS \
     --vla.learning_rate 2e-5 \
@@ -186,7 +192,11 @@ echo "exit=$rc at $(date)"
 #
 # Guard: only resubmit if the newest checkpoint is strictly HIGHER than the one we resumed
 # from. A slice that crashes before its first save would otherwise resubmit itself forever.
-if [ "${CHAIN:-0}" = "1" ]; then
+# A manual `scancel` sends SIGTERM, srun exits, and this block still runs -- so a deliberate
+# cancel used to resubmit the very run you just killed. A sentinel file is the kill switch.
+if [ -f "$RUN_ROOT/.chain_disabled" ]; then
+  echo "[chain] $RUN_ROOT/.chain_disabled present -- not resubmitting"
+elif [ "${CHAIN:-0}" = "1" ]; then
   CKDIR="$RUN_ROOT/${RUN_ID}--image_aug/checkpoints"
   NOW=$(ls -1 "$CKDIR"/step-*.pt 2>/dev/null | sed -E 's/.*step-0*([0-9]+)-epoch.*/\1/' | sort -n | tail -1)
   NOW="${NOW:-0}"

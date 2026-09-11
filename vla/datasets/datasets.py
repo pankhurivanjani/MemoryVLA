@@ -47,6 +47,10 @@ class RLDSBatchTransform:
             dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
 
         img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+        # [JSC] second view. image_obs_keys.wrist is set, so RLDS emits image_wrist; when it
+        # is absent (single-camera configs) this stays None and everything below is unchanged.
+        img_wrist = (Image.fromarray(rlds_batch["observation"]["image_wrist"][0])
+                     if "image_wrist" in rlds_batch["observation"] else None)
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
 
         # Construct Chat-based Prompt
@@ -67,6 +71,17 @@ class RLDSBatchTransform:
         #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
         input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
         pixel_values = self.image_transform(img)
+        # [JSC] Add a VIEWS axis: per-sample [3,H,W] -> [V,3,H,W]. NOT torch.cat on dim 0 --
+        # that would make a 6-channel image and break the ViT patch embed. The views axis is
+        # folded into the batch inside PrismaticVLM.forward, run through the shared tower, and
+        # unfolded back onto the patch axis so both views share one LLM sequence.
+        if img_wrist is not None:
+            pv_w = self.image_transform(img_wrist)
+            if isinstance(pixel_values, dict):
+                pixel_values = {k: torch.stack([pixel_values[k], pv_w[k]], dim=0)
+                                for k in pixel_values}
+            else:
+                pixel_values = torch.stack([pixel_values, pv_w], dim=0)
 
         # Add future actions to batch
         if rlds_batch["action"].shape[0] > 1:

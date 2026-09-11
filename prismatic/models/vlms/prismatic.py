@@ -367,10 +367,29 @@ class PrismaticVLM(VLM):
 
         # Run Visual Feature Extraction
         with torch.set_grad_enabled(self.vision_backbone_requires_grad):
+            # [JSC] multi-view: a 5-D pixel tensor is [B, V, C, H, W]. Fold V into the batch so
+            # the SHARED tower sees plain images, then unfold onto the patch axis so both views
+            # occupy one LLM sequence and can attend to each other. V=1 leaves the 4-D path
+            # byte-identical. n_views is stashed for the patch-count slice in memory_vla.py.
+            def _pv(t):
+                return t[multimodal_indices]
             if isinstance(pixel_values, dict):
-                patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values})
+                sel = {k: _pv(pixel_values[k]) for k in pixel_values}
+                ref = next(iter(sel.values()))
+                n_views = ref.shape[1] if ref.ndim == 5 else 1
+                if n_views > 1:
+                    sel = {k: v.flatten(0, 1) for k, v in sel.items()}
+                patch_features = self.vision_backbone(sel)
             else:
-                patch_features = self.vision_backbone(pixel_values[multimodal_indices])
+                sel = _pv(pixel_values)
+                n_views = sel.shape[1] if sel.ndim == 5 else 1
+                if n_views > 1:
+                    sel = sel.flatten(0, 1)
+                patch_features = self.vision_backbone(sel)
+            if n_views > 1:
+                bv, pp, dd = patch_features.shape
+                patch_features = patch_features.reshape(bv // n_views, n_views * pp, dd)
+        self.n_views = n_views
 
         self.vision_feats = patch_features
 

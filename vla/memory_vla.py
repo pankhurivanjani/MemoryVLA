@@ -122,7 +122,18 @@ class BottleneckSE(nn.Module):
 
         self.expand = nn.Conv2d(C_mid, C_out, 1, bias=False)
 
-    def forward(self, x):
+    def forward(self, x, n_views: int = 1):
+        # [JSC] n_views: with V cameras the caller passes V*P tokens, which is not a square, so
+        # the assert below would fire (it is an assert, not silent corruption -- good). Each
+        # view IS a square grid, so fold views into the batch, compress per view on its own
+        # grid, and unfold. V=1 is byte-identical to the original.
+        _b, _n, _c = x.shape
+        if n_views > 1:
+            assert _n % n_views == 0, f"{_n} tokens not divisible by {n_views} views"
+            x = x.reshape(_b * n_views, _n // n_views, _c)
+            out = self.forward(x, n_views=1)
+            return out.reshape(_b, _n, self.C_out)
+
         _b, _n, _c = x.shape
         _h = _w = int(math.sqrt(_n))
         assert _h * _h == _n, "Input feature has no spatial structure"
@@ -518,6 +529,11 @@ class MemoryVLA(nn.Module):
         else:
             raise ValueError("No vision backbone found")
 
+        # [JSC] With V views the LLM sequence carries V*num_patch vision tokens. Without this
+        # the slice below cuts in the wrong place and silently feeds vision tokens into what is
+        # treated as text -- no error, just corrupted cognition tokens.
+        num_patch = num_patch * getattr(self.vlm, "n_views", 1)
+
         # extract the last hidden state and the learnable EOS token feature
         last_hidden_state = output.hidden_states[-1]
         last_hidden_state = last_hidden_state[:, num_patch :]
@@ -531,7 +547,7 @@ class MemoryVLA(nn.Module):
             1, expanded_indices.unsqueeze(1))  # [B, 1, D]
 
         vision_feats = self.vlm.vision_feats
-        per_tokens = self.per_compr(vision_feats)
+        per_tokens = self.per_compr(vision_feats, n_views=getattr(self.vlm, "n_views", 1))
 
         cog_tokens = self.cog_mem_bank.process_batch(
             tokens=cog_tokens,
@@ -804,7 +820,7 @@ class MemoryVLA(nn.Module):
         cog_tokens = cog_tokens.unsqueeze(1).to(model_dtype)  # [B, 1, D]
 
         vision_feats = self.vlm.vision_feats
-        per_tokens = self.per_compr(vision_feats)
+        per_tokens = self.per_compr(vision_feats, n_views=getattr(self.vlm, "n_views", 1))
 
         assert episode_first_frame in ['True', 'False'], "episode_first_frame must be 'True' or 'False'"
         if episode_first_frame == 'True':
