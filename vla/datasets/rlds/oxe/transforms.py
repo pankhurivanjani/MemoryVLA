@@ -918,6 +918,10 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "droid_wipe": droid_finetuning_transform,
     ### custom Finetuning datasets
     "custom_finetuning": identity_transform,
+    # [JSC] jsc/lerobot_to_rlds.py already writes the standardized layout (observation/image,
+    # observation/joint_state, observation/gripper_state, action, language_instruction), so the
+    # standardization step is a no-op.
+    "franka_lerobot": identity_transform,
 
     ### LIBERO datasets (modified versions)
     "libero_spatial_no_noops": libero_dataset_transform,

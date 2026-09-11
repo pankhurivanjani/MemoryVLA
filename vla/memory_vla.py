@@ -631,9 +631,32 @@ class MemoryVLA(nn.Module):
 
             model_state_dict = raw_state
         else:
-            model_state_dict = torch.load(
-                pretrained_checkpoint, map_location="cuda"
-            )["model"]
+            # [JSC] map_location="cpu", not "cuda". Upstream deserializes the whole 30 GB
+            # CogACT checkpoint straight into HBM, on every rank simultaneously -- on 4x GH200
+            # that pins ~94.5 GB of the 97.8 GB available per GPU before FSDP has wrapped
+            # anything, and on Grace-Hopper's coherent memory the same pressure lands on the
+            # host, where it got a rank SIGKILLed (exitcode -9) with MaxRSS at 402 GB.
+            # The model is still on CPU at this point -- FSDP shards it further down -- so the
+            # checkpoint has no reason to touch the GPU here; load_state_dict below copies into
+            # whatever device the params live on, and `del model_state_dict` frees it after.
+            # mmap=True keeps the 30 GB state dict on disk and pages tensors in as
+            # load_state_dict copies them out, instead of materialising all 30 GB of it in RAM on
+            # every rank at once. That matters here because a GH200 node's memory is NUMA-local
+            # per module (~4x220 GB), not one shared pool, so four ranks each holding a 30 GB
+            # state dict *plus* a 28 GB fp32 model got rank 0 SIGKILLed (exitcode -9) twice --
+            # once during load and once at the first training step.
+            try:
+                model_state_dict = torch.load(
+                    pretrained_checkpoint, map_location="cpu", mmap=True
+                )["model"]
+            except (TypeError, RuntimeError, ValueError) as e:
+                # mmap needs a zipfile-serialised checkpoint (torch >= 1.6 default). Fall back
+                # rather than fail, but say so -- the fallback is what OOMs.
+                overwatch.warning(f"torch.load(mmap=True) unavailable ({e}); "
+                                  f"falling back to a full in-RAM load")
+                model_state_dict = torch.load(
+                    pretrained_checkpoint, map_location="cpu"
+                )["model"]
 
         assert (
             "projector" in model_state_dict and "llm_backbone" in model_state_dict
@@ -662,12 +685,34 @@ class MemoryVLA(nn.Module):
 
         # Load ActionModel from Checkpoint
         if "action_model" in model_state_dict:
-            memory_vla.action_model.load_state_dict(model_state_dict["action_model"], strict=False)
+            action_sd = model_state_dict["action_model"]
+            # [JSC] The released checkpoint's DiT is built for a 7-dim action space (EEF delta
+            # xyz+rpy+gripper). Ours is 8-dim (7 absolute joint targets + gripper width), so the
+            # three tensors whose shape depends on action_dim cannot transfer:
+            #   net.x_embedder.linear.weight   [1024, 7] -> [1024, 8]
+            #   net.final_layer.linear.weight  [7, 1024] -> [8, 1024]
+            #   net.final_layer.linear.bias    [7]       -> [8]
+            # `strict=False` does NOT cover this -- it forgives missing/unexpected keys but still
+            # raises on size mismatch -- so they have to be dropped explicitly. Everything else
+            # (every DiT block, the timestep and conditioning embedders) still loads pretrained;
+            # only the input and output projections start from scratch, which is unavoidable when
+            # the action space changes and is the normal way to retarget such a head.
+            own_sd = memory_vla.action_model.state_dict()
+            reinit = [k for k, v in action_sd.items()
+                      if k in own_sd and own_sd[k].shape != v.shape]
+            if reinit:
+                overwatch.warning(
+                    f"ActionModel: action_dim differs from the checkpoint; training these from "
+                    f"scratch and loading the rest pretrained: {reinit}"
+                )
+                action_sd = {k: v for k, v in action_sd.items() if k not in reinit}
+            memory_vla.action_model.load_state_dict(action_sd, strict=False)
             assert use_ema is False, "Does not support using EMA weights from pretrained checkpoint."
             if "ema_diffusion" in model_state_dict and use_ema:
                 memory_vla.ema_diffusion.load_state_dict(model_state_dict["ema_diffusion"])
             elif use_ema:
-                memory_vla.ema_diffusion.load_state_dict(model_state_dict["action_model"])
+                # [JSC] filtered the same way as above, for the same reason.
+                memory_vla.ema_diffusion.load_state_dict(action_sd, strict=False)
         else:
             overwatch.warning("No ActionModel found in the pretrained checkpoint. Initializing a new one.")
 
@@ -837,7 +882,15 @@ class MemoryVLA(nn.Module):
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
         normalized_actions = np.clip(normalized_actions, -1, 1)
-        normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < 0.5, 0, 1) 
+        # [JSC] Upstream binarizes index 6 unconditionally. That is correct for its own 7-dim
+        # action space (EEF delta xyz + rpy + binary gripper, so index 6 IS the gripper) and
+        # actively destructive for any other. Our space is 8-dim -- 7 absolute joint targets plus
+        # a CONTINUOUS gripper width -- where index 6 is joint_7: binarizing it would snap an
+        # elbow angle to 0 or 1 rad while leaving the real gripper at index 7 untouched. Guard on
+        # the shape the line was written for rather than dropping it, so the LIBERO/Bridge/Fractal
+        # paths keep upstream behaviour exactly.
+        if normalized_actions.shape[-1] == 7:
+            normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < 0.5, 0, 1)
         actions = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,

@@ -651,6 +651,19 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
 
+    # [JSC] Real-robot Franka Panda, single arm, from LeRobot v3 (jsc/lerobot_to_rlds.py).
+    # 8-dim absolute joint targets and 8-dim joint proprio -- see the JOINT_POS branch in
+    # materialize.py. MemoryVLA takes ONE camera, so only the external `right` view is wired to
+    # `primary`; the wrist stream in the source dataset is written to the RLDS shards as
+    # `wrist_image` but left unloaded here, so it costs disk and nothing else.
+    "franka_lerobot": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["joint_state", "gripper_state"],
+        "state_encoding": StateEncoding.JOINT,
+        "action_encoding": ActionEncoding.JOINT_POS,
+    },
+
     ### LIBERO datasets (modified versions)
     "libero_spatial_no_noops": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},

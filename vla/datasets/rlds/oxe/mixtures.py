@@ -258,6 +258,11 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     ],
 
     # === Custom Finetuning Datasets ===
+    # [JSC] single-dataset mixture for the real-robot Franka baseline.
+    "franka_lerobot": [
+        ("franka_lerobot", 1.0),
+    ],
+
     "custom_finetuning": [
         ("custom_finetuning", 1.0),
     ],

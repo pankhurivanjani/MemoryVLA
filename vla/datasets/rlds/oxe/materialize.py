@@ -29,8 +29,10 @@ def make_oxe_dataset_kwargs(
 ) -> Dict[str, Any]:
     """Generates config (kwargs) for given dataset from Open-X Embodiment."""
     dataset_kwargs = deepcopy(OXE_DATASET_CONFIGS[dataset_name])
-    if dataset_kwargs["action_encoding"] not in [ActionEncoding.EEF_POS, ActionEncoding.EEF_R6]:
-        raise ValueError(f"Cannot load `{dataset_name}`; only EEF_POS & EEF_R6 actions supported!")
+    if dataset_kwargs["action_encoding"] not in [
+        ActionEncoding.EEF_POS, ActionEncoding.EEF_R6, ActionEncoding.JOINT_POS
+    ]:
+        raise ValueError(f"Cannot load `{dataset_name}`; only EEF_POS, EEF_R6 & JOINT_POS supported!")
 
     # [Contract] For EEF_POS & EEF_R6 actions, only the last action dimension (gripper) is absolute!
     # Normalize all action dimensions *except* the gripper
@@ -40,6 +42,14 @@ def make_oxe_dataset_kwargs(
     elif dataset_kwargs["action_encoding"] is ActionEncoding.EEF_R6:
         dataset_kwargs["absolute_action_mask"] = [False] * 9 + [True]
         dataset_kwargs["action_normalization_mask"] = [True] * 9 + [False]
+    # [JSC] JOINT_POS: 7 joint targets + gripper width. Unlike the EEF encodings, EVERY dimension
+    # is absolute -- the LeRobot Franka `action` column is a commanded joint position, not a delta
+    # -- so past-the-end padding must repeat the last valid action, not zero it (see
+    # traj_transforms.py:75). And the gripper here is a continuous width, not a 0/1 flag, so it is
+    # normalized like the rest; the SSM policy treats it the same way (action_head.gripper_flow).
+    elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS:
+        dataset_kwargs["absolute_action_mask"] = [True] * 8
+        dataset_kwargs["action_normalization_mask"] = [True] * 8
     dataset_kwargs["action_proprio_normalization_type"] = action_proprio_normalization_type
 
     # Adjust Loaded Camera Views
