@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple, Type
 
 import numpy as np
+import os
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, IterableDataset
@@ -138,7 +139,12 @@ class RLDSDataset(IterableDataset):
         per_dataset_kwargs, weights = get_oxe_dataset_kwargs_and_weights(
             self.data_root_dir,
             mixture_spec,
-            load_camera_views=("primary",),
+            # [JSC] TWO cameras. materialize.py FILTERS image_obs_keys down to the views
+            # listed here, so wiring "wrist" in oxe/configs.py alone does nothing -- the
+            # key is discarded one layer up. Both must agree. MEMVLA_CAMERA_VIEWS lets a
+            # run fall back to single-camera without editing code.
+            load_camera_views=tuple(
+                os.environ.get("MEMVLA_CAMERA_VIEWS", "primary,wrist").split(",")),
             load_depth=load_depth,
             load_proprio=load_proprio,
             load_language=True,

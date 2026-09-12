@@ -146,15 +146,22 @@ if [ "${MEMVLA_EXPANDABLE:-0}" != "1" ]; then
   echo "PYTORCH_CUDA_ALLOC_CONF unset (GPU OOM will raise instead of spilling to host)"
 fi
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
-export MASTER_PORT=${MASTER_PORT:-29511}
+export MASTER_PORT=${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 1000))}
 
 # --trackers must be a JSON list. draccus splits any other form into CHARACTERS and raises
 # nothing: '("jsonl",)' parses to ('(', '"', 'j', 's', ...) and a bare 'jsonl' to ('j','s',...).
 # jsonl only -- W&B would need network from a compute node that has none.
 
+# [JSC] c10d rendezvous, NOT --node_rank. `srun torchrun --node_rank="$SLURM_NODEID"` is a
+# trap: the sbatch shell (on node 0) expands $SLURM_NODEID BEFORE srun spawns the tasks, so
+# every node launches as rank 0, no node ever claims rank 1, and rendezvous burns its full
+# 15-minute timeout before dying with
+#   DistStoreError: wait timeout ... keys: /none/torchelastic/role_info/0, .../1
+# c10d derives ranks from the rendezvous itself, so nothing per-node has to be interpolated
+# here. rdzv_id must be unique per job or two concurrent runs collide on the same endpoint.
 srun torchrun --nnodes=$N_NODES --nproc_per_node=$N_GPU \
-    --node_rank="$SLURM_NODEID" \
-    --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT" \
+    --rdzv_backend=c10d --rdzv_id="$SLURM_JOB_ID" \
+    --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
   train.py \
     --pretrained_checkpoint "$CKPT" \
     --vla.type 'prism-dinosiglip-224px+oxe+diffusion' \
@@ -205,7 +212,14 @@ elif [ "${CHAIN:-0}" = "1" ]; then
   elif [ "$NOW" -le "$RESUME_STEP" ]; then
     echo "[chain] NO PROGRESS (newest step $NOW <= resumed-from $RESUME_STEP) -- refusing to resubmit"
   else
-    jid=$(sbatch --parsable --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS" \
+    # Propagate the FULL context. Forwarding only TASK/RESUME/CHAIN/MAX_STEPS silently
+    # dropped --nodes (fell back to the #SBATCH default of 1), BS (fell back to 8) and
+    # MEMVLA_ASSERT_VIEWS (so the two-camera check stopped running). On 2026-09-12 that put
+    # pottimer on 1 node with no view assertion -- and, combined with 1- and 2-camera
+    # checkpoints sharing a run dir, it resumed two-camera training from one-camera weights.
+    jid=$(sbatch --parsable --nodes="$N_NODES" \
+          --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS",BS="$BS",\
+MEMVLA_ASSERT_VIEWS="${MEMVLA_ASSERT_VIEWS:-}" \
           /e/project1/m3/vanjani1/ssmpolicy/baselines/MemoryVLA/jsc/train_memvla.sbatch)
     echo "[chain] $RUN_ID at step $NOW -> resubmitted as $jid"
   fi

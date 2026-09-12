@@ -533,6 +533,15 @@ class MemoryVLA(nn.Module):
         # the slice below cuts in the wrong place and silently feeds vision tokens into what is
         # treated as text -- no error, just corrupted cognition tokens.
         num_patch = num_patch * getattr(self.vlm, "n_views", 1)
+        # MEMVLA_ASSERT_VIEWS=N makes a run fail loudly unless exactly N views are flowing.
+        # The 2026-09-11 smoke test "passed" while franka_lerobot was still single-camera:
+        # n_views was 1 and the V=1 branch is byte-identical to the old code, so exit=0 said
+        # nothing about the feature. Never trust a clean exit as evidence a view is active.
+        import os as _os
+        if _os.environ.get("MEMVLA_ASSERT_VIEWS"):
+            _want = int(_os.environ["MEMVLA_ASSERT_VIEWS"])
+            _got = getattr(self.vlm, "n_views", 1)
+            assert _got == _want, f"MEMVLA_ASSERT_VIEWS={_want} but n_views={_got}"
 
         # extract the last hidden state and the learnable EOS token feature
         last_hidden_state = output.hidden_states[-1]

@@ -53,10 +53,7 @@ class ActionEncoding(IntEnum):
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
     "fractal20220817_data": {
-        # [JSC] TWO cameras. `image` is observation.images.right (the external view);
-        # `wrist_image` is observation.images.wrist. memmap_to_rlds.py has always written
-        # both into the shards, so enabling wrist needs no reconversion.
-        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["base_pose_tool_reached", "gripper_closed"],
         "state_encoding": StateEncoding.POS_QUAT,
@@ -657,10 +654,12 @@ OXE_DATASET_CONFIGS = {
     # [JSC] Real-robot Franka Panda, single arm, from LeRobot v3 (jsc/lerobot_to_rlds.py).
     # 8-dim absolute joint targets and 8-dim joint proprio -- see the JOINT_POS branch in
     # materialize.py. MemoryVLA takes ONE camera, so only the external `right` view is wired to
-    # `primary`; the wrist stream in the source dataset is written to the RLDS shards as
-    # `wrist_image` but left unloaded here, so it costs disk and nothing else.
+    # `primary`; the wrist stream is loaded as the SECOND view (image_obs_keys below).
     "franka_lerobot": {
-        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        # [JSC] TWO cameras. `image` is observation.images.right (the external view);
+        # `wrist_image` is observation.images.wrist. memmap_to_rlds.py has always written
+        # both into the shards, so enabling wrist needs no reconversion.
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["joint_state", "gripper_state"],
         "state_encoding": StateEncoding.JOINT,
