@@ -61,6 +61,8 @@ N_GPU=4                                  # GPUs per node (gres above)
 # both from SLURM so `sbatch --nodes=4` is the only thing that has to change. world size =
 # N_NODES * N_GPU, and expected_world_size must match or FSDP hangs at init.
 N_NODES="${SLURM_JOB_NUM_NODES:-1}"
+# Intended width, sticky across the whole chain (see the chain block at the bottom).
+WANT_NODES="${WANT_NODES:-$N_NODES}"
 WORLD=$((N_NODES * N_GPU))
 # Capture what the caller actually exported BEFORE applying any default, so an explicit
 # `--export=...,BS=1` survives the SMOKE branch. (Defaulting first and then reassigning inside
@@ -128,7 +130,16 @@ if [ "${RESUME:-0}" = "1" ]; then
 fi
 [ -d "$DATA_ROOT/franka_lerobot" ] || { echo "FATAL: no RLDS at $DATA_ROOT. Run jsc/convert_rlds.sbatch first."; exit 1; }
 
-echo "task=$TASK  nodes=$N_NODES gpus/node=$N_GPU world=$WORLD  bs=$BS  global_bs=$GLOBAL_BS  max_steps=$MAX_STEPS  smoke=$SMOKE"
+echo "task=$TASK  nodes=$N_NODES (want $WANT_NODES) gpus/node=$N_GPU world=$WORLD  bs=$BS  global_bs=$GLOBAL_BS  max_steps=$MAX_STEPS  smoke=$SMOKE  assert_views=${MEMVLA_ASSERT_VIEWS:-unset}"
+# Both facts belong in the log: a slice narrower than intended, and a run with the
+# two-camera check switched off, are the two failures that previously went unnoticed
+# because nothing printed them.
+if [ "$N_NODES" != "$WANT_NODES" ]; then
+  echo "[warn] running on $N_NODES node(s) but $WANT_NODES intended"
+fi
+if [ -z "${MEMVLA_ASSERT_VIEWS:-}" ]; then
+  echo "[warn] MEMVLA_ASSERT_VIEWS unset -- the camera-count check will NOT run"
+fi
 echo "ckpt=$CKPT"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -217,9 +228,14 @@ elif [ "${CHAIN:-0}" = "1" ]; then
     # MEMVLA_ASSERT_VIEWS (so the two-camera check stopped running). On 2026-09-12 that put
     # pottimer on 1 node with no view assertion -- and, combined with 1- and 2-camera
     # checkpoints sharing a run dir, it resumed two-camera training from one-camera weights.
-    jid=$(sbatch --parsable --nodes="$N_NODES" \
+    # WANT_NODES, not N_NODES. N_NODES is what THIS slice happened to get, so a run that
+    # once fell to a single node re-submits itself at one node forever and never climbs back
+    # -- plant_flower_2scoops sat at 1 node for two slices that way, ~4x slower than the
+    # sponge run beside it, with nothing in the log calling it out. WANT_NODES carries the
+    # INTENDED width and is forwarded unchanged down the whole chain.
+    jid=$(sbatch --parsable --nodes="$WANT_NODES" \
           --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS",BS="$BS",\
-MEMVLA_ASSERT_VIEWS="${MEMVLA_ASSERT_VIEWS:-}" \
+WANT_NODES="$WANT_NODES",MEMVLA_ASSERT_VIEWS="${MEMVLA_ASSERT_VIEWS:-}" \
           /e/project1/m3/vanjani1/ssmpolicy/baselines/MemoryVLA/jsc/train_memvla.sbatch)
     echo "[chain] $RUN_ID at step $NOW -> resubmitted as $jid"
   fi
