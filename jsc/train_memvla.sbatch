@@ -252,7 +252,13 @@ elif [ "${CHAIN:-0}" = "1" ]; then
     # -- plant_flower_2scoops sat at 1 node for two slices that way, ~4x slower than the
     # sponge run beside it, with nothing in the log calling it out. WANT_NODES carries the
     # INTENDED width and is forwarded unchanged down the whole chain.
-    jid=$(sbatch --parsable --nodes="$WANT_NODES" \
+    # -J keeps the task in the NAME. Without it every chained slice is called
+    # "memvla-train" and there is no way to tell from the queue which task it belongs to:
+    # `scontrol show job` does NOT expose --export variables, so TASK= cannot be read back
+    # from a running job. On 2026-09-13 that let a rescue check conclude no sponge job was
+    # running while one was, and two jobs trained plate_sponge_sep9 into the same run
+    # directory for six hours. Match jobs by NAME; it is the only identifier the queue shows.
+    jid=$(sbatch --parsable --nodes="$WANT_NODES" -J "$SLURM_JOB_NAME" \
           --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS",BS="$BS",\
 WANT_NODES="$WANT_NODES",MEMVLA_ASSERT_VIEWS="${MEMVLA_ASSERT_VIEWS:-}" \
           /e/project1/m3/vanjani1/ssmpolicy/baselines/MemoryVLA/jsc/train_memvla.sbatch)
