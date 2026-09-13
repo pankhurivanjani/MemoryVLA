@@ -239,8 +239,20 @@ elif [ "${CHAIN:-0}" = "1" ]; then
   NOW="${NOW:-0}"
   if [ "$NOW" -ge "$MAX_STEPS" ]; then
     echo "[chain] $RUN_ID reached step $NOW >= $MAX_STEPS -- done, not resubmitting"
+  elif [ "$NOW" -le "$RESUME_STEP" ] && [ "${NOPROG:-0}" -ge 1 ]; then
+    echo "[chain] NO PROGRESS twice at step $NOW -- refusing to resubmit (systematic, needs a look)"
   elif [ "$NOW" -le "$RESUME_STEP" ]; then
-    echo "[chain] NO PROGRESS (newest step $NOW <= resumed-from $RESUME_STEP) -- refusing to resubmit"
+    # A slice can die before its first save for reasons that have nothing to do with the run:
+    # on 2026-09-13 plant hit a CUDA OOM two steps in, on a rank whose GPU already held ~52 GB
+    # of someone else's memory, after 7.5 h of the identical config succeeding. Refusing
+    # outright left the run stalled at 15000/20000 for 2.5 h with nothing raising a hand.
+    # Allow ONE retry; a second failure with no progress is systematic and should stop.
+    echo "[chain] no progress at step $NOW -- retrying once (transient failures happen)"
+    jid=$(sbatch --parsable --nodes="$WANT_NODES" -J "$SLURM_JOB_NAME" \
+          --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS",BS="$BS",NOPROG=1,\
+WANT_NODES="$WANT_NODES",MEMVLA_ASSERT_VIEWS="${MEMVLA_ASSERT_VIEWS:-}" \
+          /e/project1/m3/vanjani1/ssmpolicy/baselines/MemoryVLA/jsc/train_memvla.sbatch)
+    echo "[chain] -> $jid"
   else
     # Propagate the FULL context. Forwarding only TASK/RESUME/CHAIN/MAX_STEPS silently
     # dropped --nodes (fell back to the #SBATCH default of 1), BS (fell back to 8) and
@@ -259,7 +271,7 @@ elif [ "${CHAIN:-0}" = "1" ]; then
     # running while one was, and two jobs trained plate_sponge_sep9 into the same run
     # directory for six hours. Match jobs by NAME; it is the only identifier the queue shows.
     jid=$(sbatch --parsable --nodes="$WANT_NODES" -J "$SLURM_JOB_NAME" \
-          --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS",BS="$BS",\
+          --export=ALL,TASK="$TASK",RESUME=1,CHAIN=1,MAX_STEPS="$MAX_STEPS",BS="$BS",NOPROG=0,\
 WANT_NODES="$WANT_NODES",MEMVLA_ASSERT_VIEWS="${MEMVLA_ASSERT_VIEWS:-}" \
           /e/project1/m3/vanjani1/ssmpolicy/baselines/MemoryVLA/jsc/train_memvla.sbatch)
     echo "[chain] $RUN_ID at step $NOW -> resubmitted as $jid"
