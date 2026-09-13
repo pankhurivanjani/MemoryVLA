@@ -8,6 +8,11 @@
 #SBATCH --mem=0
 #SBATCH --exclusive
 #SBATCH --time=12:00:00
+# B: signals THIS shell, not the job step. Without it SLURM SIGTERMs the step at the cap and
+# SIGKILLs the script seconds later, so the chain block at the bottom never runs and a
+# multi-slice run just stops. Every slice that has chained so far ended early on its own, so
+# the walltime path had never actually been exercised -- it only looked like it worked.
+#SBATCH --signal=B:USR1@900
 # 12 h is the ceiling on the `normal` QOS (`sacctmgr show qos format=Name,MaxWall`); 24 h is
 # rejected outright with QOSMaxWallDurationPerJobLimit. If 20k steps do not fit, resume from the
 # last checkpoint: train.py takes --is_resume True --resume_step N --resume_epoch N with
@@ -170,6 +175,17 @@ export MASTER_PORT=${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 1000))}
 #   DistStoreError: wait timeout ... keys: /none/torchelastic/role_info/0, .../1
 # c10d derives ranks from the rendezvous itself, so nothing per-node has to be interpolated
 # here. rdzv_id must be unique per job or two concurrent runs collide on the same endpoint.
+# srun runs in the background so the USR1 handler can fire while we wait on it; a foreground
+# srun blocks the shell and the handler would only run after SIGKILL had already arrived.
+WALLTIME_STOP=0
+SRUN_PID=""
+on_walltime() {
+  WALLTIME_STOP=1
+  echo "[walltime] USR1 at $(date) -- stopping the trainer so the chain block can run"
+  [ -n "$SRUN_PID" ] && kill -TERM "$SRUN_PID" 2>/dev/null
+}
+trap on_walltime USR1
+
 srun torchrun --nnodes=$N_NODES --nproc_per_node=$N_GPU \
     --rdzv_backend=c10d --rdzv_id="$SLURM_JOB_ID" \
     --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
@@ -198,8 +214,11 @@ srun torchrun --nnodes=$N_NODES --nproc_per_node=$N_GPU \
     --resume_step $RESUME_STEP \
     --resume_epoch $RESUME_EPOCH \
     --trackers '["jsonl"]' \
-    --hf_token "$HF_HOME/token"
-rc=$?
+    --hf_token "$HF_HOME/token" &
+SRUN_PID=$!
+# `wait` returns early when a trapped signal arrives, so wait again for the real exit status.
+wait "$SRUN_PID"; rc=$?
+if [ "$rc" -gt 128 ]; then wait "$SRUN_PID" 2>/dev/null; rc=$?; fi
 echo "exit=$rc at $(date)"
 
 # --- self-chain ---------------------------------------------------------------------------
